@@ -1,24 +1,25 @@
-import os
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import os
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+TOKEN = os.environ["BOT_TOKEN"]
 
-TARGET_CHATS = [
+TARGET_CHAT_IDS = [
     -5258812606,
 ]
 
-async def forward_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
+async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args)
+    if not text:
+        await update.message.reply_text("보낼 메시지를 입력하세요.")
         return
 
-    for chat_id in TARGET_CHATS:
-        await context.bot.copy_message(
-            chat_id=chat_id,
-            from_chat_id=update.effective_chat.id,
-            message_id=update.message.message_id
-        )
+    for chat_id in TARGET_CHAT_IDS:
+        await context.bot.send_message(chat_id=chat_id, text=text)
 
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(MessageHandler(filters.ALL, forward_all))
+    await update.message.reply_text("✅ 전송 완료")
+
+app = ApplicationBuilder().token(TOKEN).build()
+app.add_handler(CommandHandler("send", send_all))
+
 app.run_polling()
