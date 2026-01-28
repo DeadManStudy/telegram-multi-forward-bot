@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 from flask import Flask, request
 from telegram import Update
 from telegram.ext import (
@@ -20,30 +21,21 @@ if not BOT_TOKEN or not RENDER_EXTERNAL_URL:
     raise RuntimeError("BOT_TOKEN 또는 RENDER_EXTERNAL_URL 환경변수가 없습니다.")
 
 # =====================
-# 파일 경로
+# 파일
 # =====================
 ADMINS_FILE = "admins.json"
 
-# =====================
-# 파일 유틸
-# =====================
 def load_admins():
     if not os.path.exists(ADMINS_FILE):
         return []
     with open(ADMINS_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def save_admins(admins):
-    with open(ADMINS_FILE, "w", encoding="utf-8") as f:
-        json.dump(admins, f, ensure_ascii=False, indent=2)
-
 # =====================
 # Telegram 핸들러
 # =====================
 async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if user_id != SUPER_ADMIN_ID:
+    if update.effective_user.id != SUPER_ADMIN_ID:
         await update.message.reply_text("❌ 권한이 없습니다.")
         return
 
@@ -58,8 +50,8 @@ async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================
 # Telegram Application
 # =====================
-application = Application.builder().token(BOT_TOKEN).build()
-application.add_handler(CommandHandler("list_admins", list_admins))
+telegram_app = Application.builder().token(BOT_TOKEN).build()
+telegram_app.add_handler(CommandHandler("list_admins", list_admins))
 
 # =====================
 # Flask App
@@ -67,27 +59,24 @@ application.add_handler(CommandHandler("list_admins", list_admins))
 app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
-def health_check():
+def health():
     return "OK", 200
 
 @app.route("/webhook", methods=["POST"])
-async def telegram_webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
+async def webhook():
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    await telegram_app.process_update(update)
     return "OK", 200
 
 # =====================
-# 웹훅 설정
+# 메인 엔트리
 # =====================
-@app.before_first_request
-def setup_webhook():
-    webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
-    application.bot.set_webhook(webhook_url)
-    print(f"Webhook set to: {webhook_url}")
+async def setup():
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.bot.set_webhook(f"{RENDER_EXTERNAL_URL}/webhook")
+    print("✅ Webhook set")
 
-# =====================
-# Run
-# =====================
 if __name__ == "__main__":
+    asyncio.run(setup())
     app.run(host="0.0.0.0", port=PORT)
