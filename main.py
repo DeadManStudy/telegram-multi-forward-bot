@@ -1,5 +1,4 @@
 import os
-import json
 import asyncio
 from flask import Flask, request
 from telegram import Update
@@ -9,93 +8,88 @@ from telegram.ext import (
     filters,
 )
 
-# ======================
+# =========================
 # 환경 변수
-# ======================
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-SUPER_ADMIN_ID = int(os.environ["SUPER_ADMIN_ID"])
+# =========================
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
-# ======================
-# 데이터 파일
-# ======================
-GROUPS_FILE = "groups.json"
+if not BOT_TOKEN or not WEBHOOK_URL:
+    raise RuntimeError("BOT_TOKEN 또는 WEBHOOK_URL 환경 변수가 설정되지 않았습니다.")
 
-def load_json(path, default):
-    if not os.path.exists(path):
-        return default
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-groups = load_json(GROUPS_FILE, {})
-
-# ======================
-# Flask
-# ======================
+# =========================
+# Flask 앱
+# =========================
 app = Flask(__name__)
 
+# =========================
+# Telegram Application
+# =========================
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# ======================
-# 관리자 체크 (슈퍼 어드민 고정)
-# ======================
-def is_admin(update: Update) -> bool:
-    user = update.effective_user
-    return bool(user and user.id == SUPER_ADMIN_ID)
 
-# ======================
-# 포워딩 로직
-# ======================
+# =========================
+# 메시지 처리 로직
+# =========================
 async def forward_all(update: Update, context):
-    if not update.message:
-        return
+    """
+    모든 메시지를 수신했음을 로그로만 확인
+    (포워딩 대상은 필요 시 여기에 추가)
+    """
+    if update.message:
+        print(
+            f"📩 message received | "
+            f"chat_id={update.message.chat_id} | "
+            f"type={update.message.chat.type}"
+        )
 
-    print("📩 message from:", update.effective_user.id)
+        # 👉 예시: 특정 chat_id로 포워딩하고 싶다면 아래 주석 해제
+        # TARGET_CHAT_ID = 123456789
+        # await update.message.forward(chat_id=TARGET_CHAT_ID)
 
-    if not is_admin(update):
-        print("⛔ not admin")
-        return
 
-    if not groups:
-        print("⚠️ groups.json 비어있음")
-        return
-
-    for cid in groups:
-        try:
-            await update.message.forward(chat_id=int(cid))
-            print(f"✅ forwarded to {cid}")
-        except Exception as e:
-            print(f"❌ forward error to {cid}:", e)
-
-# ======================
-# 핸들러
-# ======================
+# 모든 메시지 타입 처리
 telegram_app.add_handler(
     MessageHandler(filters.ALL, forward_all)
 )
 
-# ======================
-# Webhook
-# ======================
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.json, telegram_app.bot)
-    telegram_app.update_queue.put_nowait(update)
-    return "ok", 200
 
-@app.route("/")
+# =========================
+# Flask Routes
+# =========================
+@app.route("/", methods=["GET"])
 def index():
-    return "OK", 200
+    # Render 헬스체크용
+    return "Bot is running"
 
-# ======================
-# 실행
-# ======================
+
+@app.route("/webhook", methods=["POST"])
+async def webhook():
+    """
+    Telegram → Webhook → Flask → Application.update_queue
+    """
+    data = request.get_json(force=True)
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.update_queue.put(update)
+    return "ok"
+
+
+# =========================
+# Application 초기화 & Webhook 설정
+# =========================
+async def setup_telegram():
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.bot.set_webhook(url=WEBHOOK_URL)
+    print("✅ Webhook set")
+
+
+# =========================
+# Entry Point
+# =========================
 if __name__ == "__main__":
-    async def run():
-        await telegram_app.initialize()
-        await telegram_app.bot.set_webhook(
-            url="https://telegram-multi-forward-bot.onrender.com/webhook"
-        )
-        print("✅ Webhook set")
+    # Telegram Application 초기화
+    asyncio.run(setup_telegram())
 
-    asyncio.run(run())
+    # Render는 PORT=10000 사용
     app.run(host="0.0.0.0", port=10000)
