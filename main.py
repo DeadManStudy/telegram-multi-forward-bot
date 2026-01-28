@@ -22,8 +22,13 @@ ADMINS_FILE = "admins.json"
 def load_json(path, default):
     if not os.path.exists(path):
         return default
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ JSON load failed ({path}): {e}")
+        return default
+
 
 def save_json(path, data):
     with open(path, "w", encoding="utf-8") as f:
@@ -216,3 +221,4 @@ if __name__ == "__main__":
     telegram_app.initialize()
     telegram_app.start()
     app.run(host="0.0.0.0", port=PORT)
+
