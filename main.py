@@ -1,7 +1,6 @@
 import os
 import json
 import asyncio
-import threading
 from flask import Flask, request
 from telegram import Update
 from telegram.ext import (
@@ -12,6 +11,9 @@ from telegram.ext import (
     filters,
 )
 
+# ─────────────────────────
+# 환경변수
+# ─────────────────────────
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 PORT = int(os.environ.get("PORT", 10000))
 
@@ -38,7 +40,7 @@ groups = load_json(GROUPS_FILE, {})
 admins = load_json(ADMINS_FILE, [])
 
 # ─────────────────────────
-# 슈퍼 관리자
+# 슈퍼 관리자 등록
 # ─────────────────────────
 SUPER_ADMIN_ID = os.environ.get("SUPER_ADMIN_ID")
 if SUPER_ADMIN_ID:
@@ -61,7 +63,7 @@ def is_admin(update: Update) -> bool:
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
 # ─────────────────────────
-# 포워딩
+# 메시지 포워딩 (관리자만)
 # ─────────────────────────
 async def forward_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -75,10 +77,10 @@ async def forward_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await update.message.forward(chat_id=int(cid))
         except Exception as e:
-            print(f"❌ Forward error: {e}")
+            print(f"❌ Forward error ({cid}): {e}")
 
 # ─────────────────────────
-# 그룹 / 관리자 명령
+# 그룹 관리 명령
 # ─────────────────────────
 async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -86,20 +88,33 @@ async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     groups[str(chat.id)] = {"title": chat.title}
     save_json(GROUPS_FILE, groups)
-    await update.message.reply_text(f"✅ 그룹 등록됨\n{chat.title}\n{chat.id}")
+    await update.message.reply_text(
+        f"✅ 그룹 등록됨\n\n{chat.title}\n{chat.id}"
+    )
 
+# ─────────────────────────
+# 관리자 목록
+# ─────────────────────────
 async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
+
+    if not admins:
+        await update.message.reply_text("⚠️ 등록된 관리자가 없습니다.")
+        return
+
     text = "👑 관리자 목록\n\n" + "\n".join(str(a) for a in admins)
     await update.message.reply_text(text)
 
+# ─────────────────────────
+# 핸들러 등록
+# ─────────────────────────
 telegram_app.add_handler(CommandHandler("add_group", add_group))
 telegram_app.add_handler(CommandHandler("list_admins", list_admins))
 telegram_app.add_handler(MessageHandler(filters.ALL, forward_all))
 
 # ─────────────────────────
-# Flask
+# Flask (Webhook)
 # ─────────────────────────
 app = Flask(__name__)
 
@@ -114,19 +129,23 @@ def webhook():
     return "ok", 200
 
 # ─────────────────────────
-# Telegram 백그라운드 실행
+# 엔트리포인트 (핵심)
 # ─────────────────────────
-def start_telegram():
-    async def runner():
-        await telegram_app.initialize()
-        await telegram_app.start()
-        await telegram_app.bot.set_webhook(
-            url=os.environ["RENDER_EXTERNAL_URL"] + "/webhook"
-        )
-        print("🤖 Telegram bot started")
+async def main():
+    await telegram_app.initialize()
+    await telegram_app.start()
 
-    asyncio.run(runner())
+    await telegram_app.bot.set_webhook(
+        url=os.environ["RENDER_EXTERNAL_URL"] + "/webhook"
+    )
+
+    print("🤖 Telegram bot started")
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None,
+        lambda: app.run(host="0.0.0.0", port=PORT)
+    )
 
 if __name__ == "__main__":
-    threading.Thread(target=start_telegram, daemon=True).start()
-    app.run(host="0.0.0.0", port=PORT)
+    asyncio.run(main())
