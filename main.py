@@ -1,72 +1,94 @@
 import os
-import asyncio
 import threading
-from flask import Flask, request
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters
+import asyncio
 from datetime import datetime
 
+from flask import Flask, request, abort
+from telegram import Update
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 # =========================
 # 공통 로그 함수
 # =========================
-def log(step, message):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] [{step}] {message}", flush=True)
+def log(tag, msg):
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [{tag}] {msg}", flush=True)
 
 
 # =========================
-# 환경 변수
+# BOOT
 # =========================
 log("BOOT", "프로그램 시작")
 
+# =========================
+# ENV
+# =========================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://xxx.onrender.com
+PORT = int(os.environ.get("PORT", 10000))
+
+TARGET_CHAT_IDS = [
+    int(cid.strip())
+    for cid in os.environ.get("TARGET_CHAT_IDS", "").split(",")
+    if cid.strip()
+]
 
 if not BOT_TOKEN:
-    log("ENV", "❌ BOT_TOKEN 없음")
-    raise RuntimeError("BOT_TOKEN missing")
-
-if not WEBHOOK_URL:
-    log("ENV", "❌ WEBHOOK_URL 없음")
-    raise RuntimeError("WEBHOOK_URL missing")
+    raise RuntimeError("BOT_TOKEN 환경 변수가 없습니다")
 
 log("ENV", "환경 변수 로딩 완료")
-
+log("ENV", f"포워딩 대상 채팅 수: {len(TARGET_CHAT_IDS)}")
 
 # =========================
-# Flask 앱
+# Flask
 # =========================
 app = Flask(__name__)
 log("FLASK", "Flask 앱 생성 완료")
 
+# =========================
+# Telegram Handler
+# =========================
+async def forward_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        log("MSG", "메시지 아님 (무시)")
+        return
+
+    msg = update.message
+    src_chat = msg.chat
+
+    log(
+        "MSG",
+        f"수신 | from={src_chat.id} | type={src_chat.type}"
+    )
+
+    if not TARGET_CHAT_IDS:
+        log("FWD", "❌ 포워딩 대상 없음")
+        return
+
+    for target_chat_id in TARGET_CHAT_IDS:
+        try:
+            if msg.text:
+                await context.bot.send_message(
+                    chat_id=target_chat_id,
+                    text=msg.text
+                )
+            else:
+                await msg.forward(chat_id=target_chat_id)
+
+            log("FWD", f"✅ {target_chat_id} 전달 성공")
+
+        except Exception as e:
+            log("FWD", f"❌ {target_chat_id} 전달 실패: {e}")
 
 # =========================
 # Telegram Application
 # =========================
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 log("TG", "Telegram Application 생성 완료")
-
-
-# =========================
-# 메시지 핸들러
-# =========================
-async def forward_all(update: Update, context):
-    if not update.message:
-        log("MSG", "메시지 아님 (무시)")
-        return
-
-    msg = update.message
-    chat = msg.chat
-
-    log(
-        "MSG",
-        f"수신 | chat_id={chat.id} | "
-        f"type={chat.type} | "
-        f"text={'있음' if msg.text else '없음'} | "
-        f"media={'있음' if msg.photo or msg.video or msg.document else '없음'}"
-    )
-
 
 telegram_app.add_handler(
     MessageHandler(filters.ALL, forward_all)
@@ -75,74 +97,66 @@ log("TG", "MessageHandler 등록 완료")
 
 
 # =========================
-# Flask routes
+# Webhook Endpoint
 # =========================
-@app.route("/", methods=["GET"])
-def index():
-    log("HTTP", "GET / 요청 수신")
-    return "Bot is running"
-
-
 @app.route("/webhook", methods=["POST"])
 def webhook():
     log("HTTP", "POST /webhook 수신")
 
-    data = request.get_json(force=True)
-    if not data:
-        log("HTTP", "❌ webhook payload 비어있음")
-        return "no data", 400
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
 
-    try:
-        update = Update.de_json(data, telegram_app.bot)
-        log("HTTP", "Update 객체 변환 성공")
-    except Exception as e:
-        log("HTTP", f"❌ Update 변환 실패: {e}")
-        return "bad update", 400
+    asyncio.run_coroutine_threadsafe(
+        telegram_app.process_update(update),
+        telegram_loop
+    )
 
-    try:
-        asyncio.run_coroutine_threadsafe(
-            telegram_app.update_queue.put(update),
-            telegram_app.loop
-        )
-        log("HTTP", "Update queue 전달 완료")
-    except Exception as e:
-        log("HTTP", f"❌ Queue 전달 실패: {e}")
+    return "ok", 200
 
-    return "ok"
+
+@app.route("/", methods=["GET", "HEAD"])
+def index():
+    log("HTTP", "GET / 요청 수신")
+    return "ok", 200
 
 
 # =========================
-# Telegram 초기화
+# Telegram Thread
 # =========================
-async def setup_telegram():
+def run_telegram():
+    global telegram_loop
+
+    telegram_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(telegram_loop)
+
     log("TG", "initialize 시작")
-    await telegram_app.initialize()
+    telegram_loop.run_until_complete(telegram_app.initialize())
     log("TG", "initialize 완료")
 
     log("TG", "start 시작")
-    await telegram_app.start()
+    telegram_loop.run_until_complete(telegram_app.start())
     log("TG", "start 완료")
 
-    log("TG", f"webhook 설정 시도: {WEBHOOK_URL}")
-    await telegram_app.bot.set_webhook(url=WEBHOOK_URL)
+    webhook_full_url = f"{WEBHOOK_URL}/webhook"
+    log("TG", f"webhook 설정 시도: {webhook_full_url}")
+
+    telegram_loop.run_until_complete(
+        telegram_app.bot.set_webhook(webhook_full_url)
+    )
+
     log("TG", "✅ Webhook 설정 완료")
 
-
-def start_telegram():
-    log("TG", "Telegram 백그라운드 스레드 시작")
-    asyncio.run(setup_telegram())
+    telegram_loop.run_forever()
 
 
 # =========================
-# Entry point
+# MAIN
 # =========================
 if __name__ == "__main__":
     log("MAIN", "메인 엔트리 진입")
 
-    threading.Thread(
-        target=start_telegram,
-        daemon=True
-    ).start()
+    tg_thread = threading.Thread(target=run_telegram, daemon=True)
+    tg_thread.start()
+    log("TG", "Telegram 백그라운드 스레드 시작")
 
-    log("FLASK", "Flask 서버 실행 (0.0.0.0:10000)")
-    app.run(host="0.0.0.0", port=10000)
+    log("FLASK", f"Flask 서버 실행 (0.0.0.0:{PORT})")
+    app.run(host="0.0.0.0", port=PORT)
