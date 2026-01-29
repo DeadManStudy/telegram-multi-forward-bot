@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 
 from flask import Flask, request
+
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -13,129 +14,179 @@ from telegram.ext import (
     filters,
 )
 
-# ========================
+# ===============================
 # 기본 설정
-# ========================
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-WEBHOOK_URL = os.environ["WEBHOOK_URL"]  # https://xxx.onrender.com/webhook
-PORT = int(os.environ.get("PORT", 10000))
+# ===============================
 
-DATA_FILE = "groups.json"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://xxx.onrender.com
+PORT = int(os.getenv("PORT", 10000))
 
-logging.basicConfig(level=logging.INFO)
+GROUP_FILE = "groups.json"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
 logger = logging.getLogger(__name__)
 
-def log(tag, msg):
-    logger.info(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [{tag}] {msg}")
+# ===============================
+# 그룹 저장 유틸
+# ===============================
 
-# ========================
-# 데이터 관리
-# ========================
 def load_groups():
-    if not os.path.exists(DATA_FILE):
+    if not os.path.exists(GROUP_FILE):
         return []
-    with open(DATA_FILE, "r") as f:
+    with open(GROUP_FILE, "r") as f:
         return json.load(f)
 
 def save_groups(groups):
-    with open(DATA_FILE, "w") as f:
+    with open(GROUP_FILE, "w") as f:
         json.dump(groups, f)
 
-# ========================
+# ===============================
 # 명령어 핸들러
-# ========================
+# ===============================
+
 async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     groups = load_groups()
 
-    if chat_id not in groups:
-        groups.append(chat_id)
-        save_groups(groups)
-        log("GROUP", f"추가됨: {chat_id}")
+    logger.info(f"[COMMAND] /add_group from chat_id={chat_id}")
 
-    await update.message.reply_text(f"✅ 그룹 등록 완료\nID: {chat_id}")
+    if chat_id in groups:
+        await update.message.reply_text("이미 등록된 그룹입니다.")
+        logger.info(f"[GROUP] already exists: {chat_id}")
+        return
 
-async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    groups = load_groups()
-    text = "\n".join(map(str, groups)) if groups else "등록된 그룹 없음"
-    await update.message.reply_text(text)
+    groups.append(chat_id)
+    save_groups(groups)
+
+    await update.message.reply_text(f"그룹 등록 완료: {chat_id}")
+    logger.info(f"[GROUP] added: {chat_id}")
+    logger.info(f"[GROUP] current groups = {groups}")
 
 async def remove_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     groups = load_groups()
 
-    if chat_id in groups:
-        groups.remove(chat_id)
-        save_groups(groups)
-        log("GROUP", f"삭제됨: {chat_id}")
+    logger.info(f"[COMMAND] /remove_group from chat_id={chat_id}")
 
-    await update.message.reply_text("❌ 그룹 제거 완료")
-
-# ========================
-# 🔥 포워딩 핸들러 (핵심)
-# ========================
-async def forward_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
+    if chat_id not in groups:
+        await update.message.reply_text("등록되지 않은 그룹입니다.")
+        logger.info(f"[GROUP] not found: {chat_id}")
         return
 
-    src_chat = update.effective_chat.id
-    msg_id = update.message.message_id
+    groups.remove(chat_id)
+    save_groups(groups)
 
+    await update.message.reply_text(f"그룹 삭제 완료: {chat_id}")
+    logger.info(f"[GROUP] removed: {chat_id}")
+    logger.info(f"[GROUP] current groups = {groups}")
+
+async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     groups = load_groups()
 
-    log("FORWARD", f"메시지 감지 from {src_chat}, 대상 {groups}")
+    logger.info(f"[COMMAND] /list_groups")
 
-    for target in groups:
-        # 자기 자신에게 다시 보내는 건 스킵
-        if target == src_chat:
+    if not groups:
+        await update.message.reply_text("등록된 그룹이 없습니다.")
+        logger.info("[GROUP] list empty")
+        return
+
+    msg = "\n".join(str(g) for g in groups)
+    await update.message.reply_text(f"등록된 그룹 목록:\n{msg}")
+    logger.info(f"[GROUP] list = {groups}")
+
+# ===============================
+# 메시지 포워딩
+# ===============================
+
+async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    chat_id = msg.chat.id
+    text = msg.text
+
+    logger.info(
+        f"[UPDATE] MESSAGE chat_id={chat_id} "
+        f"type={'COMMAND' if text and text.startswith('/') else 'TEXT'} "
+        f"text={text}"
+    )
+
+    # 명령어는 포워딩 금지
+    if text and text.startswith("/"):
+        logger.info("[SKIP] command message → no forwarding")
+        return
+
+    groups = load_groups()
+    logger.info(f"[FORWARD] target groups = {groups}")
+
+    if not groups:
+        logger.info("[SKIP] no groups registered")
+        return
+
+    for target_chat_id in groups:
+        if target_chat_id == chat_id:
+            logger.info(f"[SKIP] self chat_id={chat_id}")
             continue
 
         try:
-            await context.bot.copy_message(
-                chat_id=target,
-                from_chat_id=src_chat,
-                message_id=msg_id,
+            logger.info(
+                f"[FORWARD] sending from {chat_id} → {target_chat_id}"
             )
-            log("FORWARD", f"→ 전달 성공: {target}")
-        except Exception as e:
-            log("ERROR", f"전달 실패 ({target}): {e}")
+            await context.bot.send_message(
+                chat_id=target_chat_id,
+                text=text
+            )
+            logger.info(f"[FORWARD] success → {target_chat_id}")
 
-# ========================
-# 앱 초기화
-# ========================
-log("BOOT", "프로그램 시작")
+        except Exception as e:
+            logger.error(
+                f"[ERROR] failed to send to {target_chat_id}: {e}"
+            )
+
+# ===============================
+# Flask + Webhook
+# ===============================
 
 app = Flask(__name__)
 application = Application.builder().token(BOT_TOKEN).build()
 
 application.add_handler(CommandHandler("add_group", add_group))
-application.add_handler(CommandHandler("list_groups", list_groups))
 application.add_handler(CommandHandler("remove_group", remove_group))
+application.add_handler(CommandHandler("list_groups", list_groups))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, forward_message))
 
-# ⭐ 이 줄이 없으면 포워딩은 절대 안 됨
-application.add_handler(
-    MessageHandler(filters.ALL & ~filters.COMMAND, forward_all)
-)
+@app.route("/", methods=["GET"])
+def index():
+    return "Bot is running"
 
 @app.route("/webhook", methods=["POST"])
 async def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
+    update = Update.de_json(request.json, application.bot)
+    logger.info(
+        f"[WEBHOOK] update received: keys={list(request.json.keys())}"
+    )
     await application.process_update(update)
     return "OK"
 
-@app.route("/")
-def health():
-    return "OK"
+# ===============================
+# 부트스트랩
+# ===============================
 
-async def startup():
-    log("TG", "initialize 시작")
+async def main():
+    logger.info("[BOOT] 프로그램 시작")
+
     await application.initialize()
-    await application.bot.set_webhook(WEBHOOK_URL)
-    await application.start()
-    log("TG", "Webhook 등록 완료")
+    await application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
 
-import asyncio
-asyncio.get_event_loop().run_until_complete(startup())
+    logger.info("[TG] Webhook 설정 완료")
+    logger.info("[FLASK] 서버 시작")
 
-log("FLASK", f"서버 실행: {PORT}")
-app.run(host="0.0.0.0", port=PORT)
+if __name__ == "__main__":
+    import asyncio
+
+    asyncio.run(main())
+    app.run(host="0.0.0.0", port=PORT)
