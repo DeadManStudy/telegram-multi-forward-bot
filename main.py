@@ -1,27 +1,26 @@
 """
 telegram-multi-forward-bot
-- Webhook 기반 Telegram 봇
-- Render Web Service용
-- 그룹을 동적으로 등록하여 메시지를 다중 포워딩
-- python-telegram-bot v20.x 안정 패턴 적용
+- Flask Webhook 기반
+- Render Web Service 대응
+- 그룹을 동적으로 등록하여 메시지 다중 포워딩
 """
 
 # ======================
 # 1. 기본 라이브러리
 # ======================
 import os
-import logging
 import asyncio
+import logging
 from datetime import datetime
 from threading import Thread
 
 # ======================
-# 2. Flask (Webhook 수신)
+# 2. Flask
 # ======================
 from flask import Flask, request, abort
 
 # ======================
-# 3. Telegram 라이브러리
+# 3. Telegram
 # ======================
 from telegram import Update
 from telegram.ext import (
@@ -33,7 +32,7 @@ from telegram.ext import (
 )
 
 # ======================
-# 4. 로깅 설정
+# 4. 로깅
 # ======================
 logging.basicConfig(level=logging.INFO)
 
@@ -49,7 +48,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://xxxx.onrender.com
 
 if not BOT_TOKEN or not WEBHOOK_URL:
-    raise RuntimeError("BOT_TOKEN 또는 WEBHOOK_URL 이 없습니다.")
+    raise RuntimeError("BOT_TOKEN 또는 WEBHOOK_URL 누락")
 
 log("ENV", "환경 변수 로딩 완료")
 
@@ -66,20 +65,27 @@ telegram_app = Application.builder().token(BOT_TOKEN).build()
 log("TG", "Telegram Application 생성")
 
 # ======================
-# 8. 포워딩 대상 그룹 (메모리 기반)
+# 8. 이벤트 루프 (중요)
+# ======================
+telegram_loop = asyncio.new_event_loop()
+
+# ======================
+# 9. 포워딩 대상 그룹
 # ======================
 TARGET_GROUPS: set[int] = set()
 
 # ======================
-# 9. 유틸 함수
+# 10. 유틸
 # ======================
 def is_group(update: Update) -> bool:
     return update.effective_chat.type in ("group", "supergroup")
 
 # ======================
-# 10. 명령어 핸들러
+# 11. 명령어 핸들러
 # ======================
 async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log("CMD", "/add_group 수신")
+
     if not is_group(update):
         await update.message.reply_text("❌ 그룹에서만 사용 가능합니다.")
         return
@@ -91,10 +97,11 @@ async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ 이 그룹이 전달 대상에 추가되었습니다.")
 
 async def remove_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    gid = update.effective_chat.id
+    log("CMD", "/remove_group 수신")
 
+    gid = update.effective_chat.id
     if gid not in TARGET_GROUPS:
-        await update.message.reply_text("⚠️ 이 그룹은 등록되어 있지 않습니다.")
+        await update.message.reply_text("⚠️ 등록되지 않은 그룹입니다.")
         return
 
     TARGET_GROUPS.remove(gid)
@@ -102,45 +109,48 @@ async def remove_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🗑️ 전달 대상에서 제거되었습니다.")
 
 async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log("CMD", "/list_groups 수신")
+
     if not TARGET_GROUPS:
-        await update.message.reply_text("📭 현재 등록된 그룹이 없습니다.")
+        await update.message.reply_text("📭 등록된 그룹이 없습니다.")
         return
 
-    text = "📤 현재 메시지를 전달 중인 그룹 목록:\n\n"
+    text = "📤 메시지 전달 중인 그룹:\n\n"
     for gid in TARGET_GROUPS:
         text += f"- {gid}\n"
 
     await update.message.reply_text(text)
 
 # ======================
-# 11. 메시지 포워딩
+# 12. 메시지 포워딩
 # ======================
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
 
+    src = update.effective_chat.id
+    log("FORWARD", f"메시지 수신: from {src}")
+
     if not TARGET_GROUPS:
+        log("FORWARD", "전달 대상 없음")
         return
 
-    from_chat_id = update.effective_chat.id
-
     for gid in TARGET_GROUPS:
-        # 자기 자신에게는 포워딩하지 않음
-        if gid == from_chat_id:
-            continue
+        if gid == src:
+            continue  # 자기 자신에게 재포워딩 방지
 
         try:
             await context.bot.forward_message(
                 chat_id=gid,
-                from_chat_id=from_chat_id,
+                from_chat_id=src,
                 message_id=update.message.message_id,
             )
-            log("FORWARD", f"{from_chat_id} → {gid} 전달 성공")
+            log("FORWARD", f"{src} → {gid} 전달 성공")
         except Exception as e:
-            log("FORWARD", f"❌ {gid} 전달 실패: {e}")
+            log("FORWARD", f"❌ {gid} 실패: {e}")
 
 # ======================
-# 12. 핸들러 등록
+# 13. 핸들러 등록
 # ======================
 telegram_app.add_handler(CommandHandler("add_group", add_group))
 telegram_app.add_handler(CommandHandler("remove_group", remove_group))
@@ -152,25 +162,24 @@ telegram_app.add_handler(
 log("TG", "핸들러 등록 완료")
 
 # ======================
-# 13. Flask Webhook
+# 14. Webhook 엔드포인트
 # ======================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     log("HTTP", "POST /webhook 수신")
 
     try:
-        update = Update.de_json(
-            request.get_json(force=True),
-            telegram_app.bot
-        )
+        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+        log("HTTP", "Update 객체 생성 완료")
     except Exception as e:
-        log("HTTP", f"❌ Update 변환 실패: {e}")
+        log("HTTP", f"❌ Update 파싱 실패: {e}")
         abort(400)
 
-    # ⭐ 핵심 포인트
-    # process_update를 직접 호출하지 않고
-    # Application 내부 update_queue에 안전하게 전달
-    telegram_app.update_queue.put_nowait(update)
+    # 🔥 핵심: Dispatcher에 직접 전달
+    asyncio.run_coroutine_threadsafe(
+        telegram_app.process_update(update),
+        telegram_loop,
+    )
 
     return "OK", 200
 
@@ -179,17 +188,17 @@ def health():
     return "OK", 200
 
 # ======================
-# 14. Telegram 실행 루프
+# 15. Telegram 백그라운드 실행
 # ======================
-telegram_loop = asyncio.new_event_loop()
-
 async def run_telegram():
+    log("TG", "initialize 시작")
     await telegram_app.initialize()
+
+    log("TG", "start 시작")
     await telegram_app.start()
 
     webhook_url = f"{WEBHOOK_URL}/webhook"
     await telegram_app.bot.set_webhook(webhook_url)
-
     log("TG", f"Webhook 설정 완료: {webhook_url}")
 
 def start_telegram():
@@ -198,7 +207,7 @@ def start_telegram():
     telegram_loop.run_forever()
 
 # ======================
-# 15. 메인 엔트리포인트
+# 16. 메인
 # ======================
 if __name__ == "__main__":
     Thread(target=start_telegram, daemon=True).start()
