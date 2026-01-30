@@ -1,7 +1,8 @@
 """
 telegram-multi-forward-bot
-- Webhook 기반 Telegram 봇 (Render)
-- 관리자만 메시지 포워딩
+- Webhook 기반 Telegram 봇
+- Render Web Service용
+- 관리자만 포워딩, 모든 메시지 유형 지원
 """
 
 # ======================
@@ -37,6 +38,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
+
 def log(tag, msg):
     logging.info(f"[{tag}] {msg}")
 
@@ -47,9 +49,7 @@ log("BOOT", "프로그램 시작")
 # ======================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-SUPER_ADMIN_IDS = set(
-    int(x) for x in os.getenv("SUPER_ADMIN_IDS", "").split(",") if x.strip()
-)
+SUPER_ADMIN_IDS = set(int(x) for x in os.getenv("SUPER_ADMIN_IDS", "").split(",") if x.strip())
 
 if not BOT_TOKEN or not WEBHOOK_URL:
     raise RuntimeError("BOT_TOKEN 또는 WEBHOOK_URL 누락")
@@ -81,7 +81,7 @@ log("STATE", f"등록된 그룹 수={len(TARGET_GROUPS)}")
 log("STATE", f"관리자 수={len(ADMINS)}")
 
 # ======================
-# 7. Flask
+# 7. Flask 앱
 # ======================
 app = Flask(__name__)
 log("FLASK", "Flask 앱 생성")
@@ -131,18 +131,16 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not TARGET_GROUPS:
         await update.message.reply_text("📭 등록된 그룹 없음")
         return
-    text = "📤 포워딩 그룹 목록:\n\n"
-    for gid in TARGET_GROUPS:
-        text += f"- {gid}\n"
+    text = "📤 포워딩 그룹 목록:\n\n" + "\n".join(f"- {gid}" for gid in TARGET_GROUPS)
     await update.message.reply_text(text)
 
 async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_super_admin(uid):
-        await update.message.reply_text("⚠️ 슈퍼어드민만 사용 가능")
+        await update.message.reply_text("❌ 슈퍼어드민만 사용 가능")
         return
     if not context.args:
-        await update.message.reply_text("⚠️ 관리자 ID를 입력하세요")
+        await update.message.reply_text("❌ 관리자 ID 필요")
         return
     new_admin = int(context.args[0])
     ADMINS.add(new_admin)
@@ -151,17 +149,11 @@ async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ 관리자 추가됨")
 
 async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not is_admin(uid):
-        await update.message.reply_text("⚠️ 관리자만 확인 가능")
-        return
-    text = "👮 관리자 목록:\n\n"
-    for admin in ADMINS:
-        text += f"- {admin}\n"
+    text = "👑 관리자 목록:\n\n" + "\n".join(str(uid) for uid in ADMINS)
     await update.message.reply_text(text)
 
 # ======================
-# 11. 포워딩 (관리자만)
+# 11. 메시지 포워딩 (모든 메시지 유형, 깨짐 없음)
 # ======================
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -169,46 +161,44 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid = update.effective_user.id
     cid = update.effective_chat.id
-    mid = update.message.message_id
 
-    if is_admin(uid):
-        log("MSG", f"관리자 확인 uid={uid} → 포워딩 진행")
-    else:
-        log("MSG", f"관리자 아님 uid={uid} → 포워딩 차단")
-        await update.message.reply_text("⚠️ 관리자만 포워딩 가능")
+    # 개인 채팅에서만 포워딩
+    if update.effective_chat.type != "private":
         return
 
-    if not TARGET_GROUPS:
-        log("MSG", "포워딩 대상 없음 → 무시")
+    if not is_admin(uid):
+        log("MSG", f"관리자 아님 → 차단 (uid={uid})")
+        await update.message.reply_text("❌ 포워딩 차단됨")
         return
 
     for gid in TARGET_GROUPS:
-        if gid == cid:
-            log("FORWARD", f"자기 자신({gid}) → 스킵")
-            continue
         try:
+            # Telegram API forward_message 사용 → 프리미엄 이모지도 깨지지 않음
             await context.bot.forward_message(
                 chat_id=gid,
                 from_chat_id=cid,
-                message_id=mid,
+                message_id=update.message.message_id,
             )
             log("FORWARD", f"{cid} → {gid} 전달 성공")
         except Exception as e:
-            log("FORWARD", f"{gid} 전달 실패: {e}")
+            log("FORWARD", f"{cid} → {gid} 실패: {e}")
 
 # ======================
-# 12. 핸들러
+# 12. 핸들러 등록
 # ======================
 application.add_handler(CommandHandler("add_group", add_group))
 application.add_handler(CommandHandler("remove_group", remove_group))
 application.add_handler(CommandHandler("list_groups", list_groups))
 application.add_handler(CommandHandler("add_admin", add_admin))
 application.add_handler(CommandHandler("list_admins", list_admins))
-application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, forward_message))
+application.add_handler(
+    MessageHandler(filters.ALL & ~filters.COMMAND, forward_message)
+)
+
 log("TG", "핸들러 등록 완료")
 
 # ======================
-# 13. Webhook
+# 13. Flask Webhook
 # ======================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -219,7 +209,11 @@ def webhook():
         log("HTTP", f"Update 파싱 실패: {e}")
         abort(400)
 
-    asyncio.run_coroutine_threadsafe(application.process_update(update), telegram_loop)
+    asyncio.run_coroutine_threadsafe(
+        application.process_update(update),
+        telegram_loop
+    )
+
     return "OK", 200
 
 @app.route("/")
@@ -227,7 +221,7 @@ def health():
     return "OK", 200
 
 # ======================
-# 14. Telegram 루프
+# 14. Telegram 이벤트 루프
 # ======================
 telegram_loop = asyncio.new_event_loop()
 
@@ -247,6 +241,6 @@ def start_telegram():
 # ======================
 if __name__ == "__main__":
     Thread(target=start_telegram, daemon=True).start()
+    log("MAIN", "Telegram 백그라운드 스레드 시작")
     port = int(os.getenv("PORT", 10000))
-    log("FLASK", f"Flask 실행 port={port}")
     app.run(host="0.0.0.0", port=port)
