@@ -1,8 +1,10 @@
 """
 telegram-multi-forward-bot
-- Webhook 기반 Telegram 봇
-- Render Web Service용
-- 개인 채팅 메시지 관리자가 포워딩
+- Webhook 기반 Telegram 봇 (Render)
+- 관리자만 포워딩 가능
+- 개인 채팅에서 받은 메시지만 포워딩
+- /add_group, /remove_group 만 단체방에서도 동작
+- 메시지 내용 변형 없음 (프리미엄 이모지 유지)
 """
 
 # ======================
@@ -36,13 +38,13 @@ from telegram.ext import (
 # ======================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
 def log(tag, msg):
     logging.info(f"[{tag}] {msg}")
 
-log("BOOT", "프로그램 시작")
+log("BOOT", "🔥 THIS IS THE CURRENT main.py 🔥")
 
 # ======================
 # 5. 환경변수
@@ -110,11 +112,11 @@ def is_admin(uid: int):
 # 10. 명령어
 # ======================
 async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cid = update.effective_chat.id
     if not is_group(update):
         await update.message.reply_text("❌ 그룹에서만 사용 가능")
         return
 
+    cid = update.effective_chat.id
     TARGET_GROUPS.add(cid)
     save_json(GROUP_FILE, list(TARGET_GROUPS))
     log("GROUP", f"추가됨 {cid}")
@@ -142,22 +144,22 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not is_super_admin(uid):
+    if not is_super_admin(update.effective_user.id):
         return
 
     if not context.args:
         return
 
-    new_admin = int(context.args[0])
-    ADMINS.add(new_admin)
+    uid = int(context.args[0])
+    ADMINS.add(uid)
     save_json(ADMIN_FILE, list(ADMINS))
-    log("ADMIN", f"관리자 추가 {new_admin}")
+    log("ADMIN", f"관리자 추가 {uid}")
     await update.message.reply_text("✅ 관리자 추가됨")
 
 async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admins = ADMINS.union(SUPER_ADMIN_IDS)
     text = "🛡️ 관리자 목록:\n\n"
-    for uid in ADMINS.union(SUPER_ADMIN_IDS):
+    for uid in admins:
         text += f"- {uid}\n"
     await update.message.reply_text(text)
 
@@ -168,16 +170,18 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
 
-    uid = update.effective_user.id
-    cid = update.effective_chat.id
-
-    # 🔹 개인 채팅에서만 포워딩
+    # 🔹 개인 채팅에서만 처리
     if update.effective_chat.type != "private":
         return
 
+    uid = update.effective_user.id
+    cid = update.effective_chat.id
+
+    log("MSG", f"개인채팅 수신 uid={uid}")
+
     # 🔹 관리자 체크
     if not is_admin(uid):
-        log("MSG", f"관리자 아님 → 차단 (uid={uid})")
+        log("MSG", f"관리자 아님 → 차단 uid={uid}")
         await update.message.reply_text("❌ 포워딩 차단됨")
         return
 
@@ -201,6 +205,7 @@ application.add_handler(CommandHandler("list_groups", list_groups))
 application.add_handler(CommandHandler("add_admin", add_admin))
 application.add_handler(CommandHandler("list_admins", list_admins))
 
+# 🔥 메시지는 오직 여기 하나만
 application.add_handler(
     MessageHandler(filters.ALL & ~filters.COMMAND, forward_message)
 )
@@ -221,7 +226,7 @@ def webhook():
 
     asyncio.run_coroutine_threadsafe(
         application.process_update(update),
-        telegram_loop
+        telegram_loop,
     )
     return "OK", 200
 
