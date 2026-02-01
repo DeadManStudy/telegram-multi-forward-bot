@@ -1,10 +1,8 @@
 """
-telegram-multi-forward-bot
-- Webhook 기반 Telegram 봇 (Render)
-- 관리자만 포워딩 가능
-- 개인 채팅에서 받은 메시지만 포워딩
-- /add_group, /remove_group 만 단체방에서도 동작
-- 메시지 내용 변형 없음 (프리미엄 이모지 유지)
+telegram-multi-forward-bot FINAL
+- Webhook
+- Super Admin only
+- Group Set + add_group / list_groups 유지
 """
 
 # ======================
@@ -38,195 +36,216 @@ from telegram.ext import (
 # ======================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
 def log(tag, msg):
     logging.info(f"[{tag}] {msg}")
 
-log("BOOT", "🔥 THIS IS THE CURRENT main.py 🔥")
+log("BOOT", "프로그램 시작")
 
 # ======================
 # 5. 환경변수
 # ======================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-SUPER_ADMIN_IDS = set(
+
+SUPER_ADMIN_IDS = {
     int(x) for x in os.getenv("SUPER_ADMIN_IDS", "").split(",") if x.strip()
-)
+}
 
 if not BOT_TOKEN or not WEBHOOK_URL:
-    raise RuntimeError("BOT_TOKEN 또는 WEBHOOK_URL 누락")
-
-log("ENV", f"SUPER_ADMIN_IDS={SUPER_ADMIN_IDS}")
+    raise RuntimeError("필수 환경변수 누락")
 
 # ======================
-# 6. 데이터 파일
+# 6. 그룹 로딩
 # ======================
 GROUP_FILE = "groups.json"
-ADMIN_FILE = "admins.json"
 
-def load_json(path, default):
-    if not os.path.exists(path):
-        with open(path, "w") as f:
-            json.dump(default, f)
-        return default
-    with open(path) as f:
-        return json.load(f)
+def load_groups():
+    base = {}
 
-def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f)
+    # 🔹 환경변수 그룹
+    for k, v in os.environ.items():
+        if k.startswith("GROUP_") and k.endswith("_IDS"):
+            name = k.replace("GROUP_", "").replace("_IDS", "").lower()
+            base[name] = {int(x) for x in v.split(",") if x.strip()}
 
-TARGET_GROUPS = set(load_json(GROUP_FILE, []))
-ADMINS = set(load_json(ADMIN_FILE, []))
+    # 🔹 파일 그룹
+    if os.path.exists(GROUP_FILE):
+        with open(GROUP_FILE) as f:
+            saved = json.load(f)
+        for name, ids in saved.items():
+            base.setdefault(name, set()).update(ids)
 
-log("STATE", f"등록된 그룹 수={len(TARGET_GROUPS)}")
-log("STATE", f"관리자 수={len(ADMINS)}")
+    return base
+
+def save_groups():
+    with open(GROUP_FILE, "w") as f:
+        json.dump(
+            {k: list(v) for k, v in GROUP_SETS.items()},
+            f
+        )
+
+GROUP_SETS = load_groups()
+log("STATE", f"GROUP_SETS={GROUP_SETS}")
+
+# 사용자 상태
+ACTIVE_GROUP = {}  # uid -> group_name
 
 # ======================
 # 7. Flask
 # ======================
 app = Flask(__name__)
-log("FLASK", "Flask 앱 생성")
 
 # ======================
-# 8. Telegram Application
+# 8. Telegram App
 # ======================
 application = Application.builder().token(BOT_TOKEN).build()
-log("TG", "Telegram Application 생성")
 
 # ======================
-# 9. 유틸
+# 9. 권한
 # ======================
-def is_group(update: Update):
-    return update.effective_chat.type in ("group", "supergroup")
-
-def is_super_admin(uid: int):
+def is_super_admin(uid: int) -> bool:
     return uid in SUPER_ADMIN_IDS
 
-def is_admin(uid: int):
-    return uid in ADMINS or is_super_admin(uid)
-
 # ======================
-# 10. 명령어
+# 10. 그룹 관리 명령어
 # ======================
 async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_group(update):
-        await update.message.reply_text("❌ 그룹에서만 사용 가능")
+    uid = update.effective_user.id
+    chat = update.effective_chat
+
+    if not is_super_admin(uid):
         return
 
-    cid = update.effective_chat.id
-    TARGET_GROUPS.add(cid)
-    save_json(GROUP_FILE, list(TARGET_GROUPS))
-    log("GROUP", f"추가됨 {cid}")
-    await update.message.reply_text("✅ 포워딩 그룹으로 등록됨")
-
-async def remove_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cid = update.effective_chat.id
-    if cid not in TARGET_GROUPS:
-        await update.message.reply_text("⚠️ 등록되지 않은 그룹")
-        return
-
-    TARGET_GROUPS.remove(cid)
-    save_json(GROUP_FILE, list(TARGET_GROUPS))
-    log("GROUP", f"제거됨 {cid}")
-    await update.message.reply_text("🗑️ 포워딩 그룹에서 제거됨")
-
-async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not TARGET_GROUPS:
-        await update.message.reply_text("📭 등록된 그룹 없음")
-        return
-
-    text = "📤 포워딩 그룹 목록:\n\n"
-    for gid in TARGET_GROUPS:
-        text += f"- {gid}\n"
-    await update.message.reply_text(text)
-
-async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_super_admin(update.effective_user.id):
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("❌ 단체방에서만 사용 가능")
         return
 
     if not context.args:
+        await update.message.reply_text("사용법: /add_group group1")
         return
 
-    uid = int(context.args[0])
-    ADMINS.add(uid)
-    save_json(ADMIN_FILE, list(ADMINS))
-    log("ADMIN", f"관리자 추가 {uid}")
-    await update.message.reply_text("✅ 관리자 추가됨")
+    name = context.args[0].lower()
+    GROUP_SETS.setdefault(name, set()).add(chat.id)
+    save_groups()
 
-async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admins = ADMINS.union(SUPER_ADMIN_IDS)
-    text = "🛡️ 관리자 목록:\n\n"
-    for uid in admins:
-        text += f"- {uid}\n"
+    await update.message.reply_text(f"✅ {name}에 등록됨")
+    log("GROUP", f"{chat.id} → {name}")
+
+async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_super_admin(uid):
+        return
+
+    if not GROUP_SETS:
+        await update.message.reply_text("📭 등록된 그룹 없음")
+        return
+
+    text = "📦 그룹 목록:\n\n"
+    for name, ids in GROUP_SETS.items():
+        text += f"🔹 {name}\n"
+        for gid in ids:
+            try:
+                chat = await context.bot.get_chat(gid)
+                title = chat.title or gid
+            except Exception:
+                title = gid
+            text += f"  - {title}\n"
+        text += "\n"
+
     await update.message.reply_text(text)
 
 # ======================
-# 11. 포워딩 (개인 채팅 + 관리자만)
+# 11. send_group 핸들러
+# ======================
+def make_send_handler(group_name: str):
+    async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        uid = update.effective_user.id
+        if not is_super_admin(uid):
+            return
+
+        if group_name not in GROUP_SETS:
+            await update.message.reply_text("❌ 존재하지 않는 그룹")
+            return
+
+        ACTIVE_GROUP[uid] = group_name
+
+        titles = []
+        for gid in GROUP_SETS[group_name]:
+            try:
+                chat = await context.bot.get_chat(gid)
+                titles.append(chat.title or gid)
+            except Exception:
+                titles.append(str(gid))
+
+        msg = f"📤 다음 단체방으로 전송됩니다:\n\n"
+        for t in titles:
+            msg += f"- {t}\n"
+
+        await update.message.reply_text(msg)
+        log("MODE", f"{uid} → {group_name}")
+
+    return handler
+
+# ======================
+# 12. 중단
+# ======================
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ACTIVE_GROUP.pop(update.effective_user.id, None)
+    await update.message.reply_text("⏹️ 전송 중단")
+
+# ======================
+# 13. 포워딩
 # ======================
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
-
-    # 🔹 개인 채팅에서만 처리
     if update.effective_chat.type != "private":
         return
 
     uid = update.effective_user.id
-    cid = update.effective_chat.id
-
-    log("MSG", f"개인채팅 수신 uid={uid}")
-
-    # 🔹 관리자 체크
-    if not is_admin(uid):
-        log("MSG", f"관리자 아님 → 차단 uid={uid}")
-        await update.message.reply_text("❌ 포워딩 차단됨")
+    if not is_super_admin(uid):
+        await update.message.reply_text("❌ 관리자만 포워딩 가능")
         return
 
-    for gid in TARGET_GROUPS:
-        try:
-            await context.bot.forward_message(
-                chat_id=gid,
-                from_chat_id=cid,
-                message_id=update.message.message_id,
-            )
-            log("FORWARD", f"{cid} → {gid} 전달 성공")
-        except Exception as e:
-            log("FORWARD", f"{cid} → {gid} 전달 실패: {e}")
+    group = ACTIVE_GROUP.get(uid)
+    if not group:
+        return
+
+    for gid in GROUP_SETS[group]:
+        await context.bot.forward_message(
+            chat_id=gid,
+            from_chat_id=update.effective_chat.id,
+            message_id=update.message.message_id
+        )
 
 # ======================
-# 12. 핸들러 등록
+# 14. 핸들러 등록
 # ======================
 application.add_handler(CommandHandler("add_group", add_group))
-application.add_handler(CommandHandler("remove_group", remove_group))
 application.add_handler(CommandHandler("list_groups", list_groups))
-application.add_handler(CommandHandler("add_admin", add_admin))
-application.add_handler(CommandHandler("list_admins", list_admins))
+application.add_handler(CommandHandler("stop", stop))
 
-# 🔥 메시지는 오직 여기 하나만
+for name in GROUP_SETS:
+    application.add_handler(
+        CommandHandler(f"send_{name}", make_send_handler(name))
+    )
+
 application.add_handler(
     MessageHandler(filters.ALL & ~filters.COMMAND, forward_message)
 )
 
-log("TG", "핸들러 등록 완료")
-
 # ======================
-# 13. Webhook
+# 15. Webhook
 # ======================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    log("HTTP", "POST /webhook 수신")
-    try:
-        update = Update.de_json(request.get_json(force=True), application.bot)
-    except Exception as e:
-        log("HTTP", f"Update 파싱 실패: {e}")
-        abort(400)
-
+    update = Update.de_json(request.get_json(force=True), application.bot)
     asyncio.run_coroutine_threadsafe(
         application.process_update(update),
-        telegram_loop,
+        telegram_loop
     )
     return "OK", 200
 
@@ -235,26 +254,20 @@ def health():
     return "OK", 200
 
 # ======================
-# 14. Telegram 루프
+# 16. Run
 # ======================
 telegram_loop = asyncio.new_event_loop()
 
-async def run_telegram():
+async def run_tg():
     await application.initialize()
     await application.start()
     await application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
-    log("TG", "Webhook 설정 완료")
 
-def start_telegram():
+def start_tg():
     asyncio.set_event_loop(telegram_loop)
-    telegram_loop.run_until_complete(run_telegram())
+    telegram_loop.run_until_complete(run_tg())
     telegram_loop.run_forever()
 
-# ======================
-# 15. MAIN
-# ======================
 if __name__ == "__main__":
-    Thread(target=start_telegram, daemon=True).start()
-    port = int(os.getenv("PORT", 10000))
-    log("FLASK", f"Flask 실행 port={port}")
-    app.run(host="0.0.0.0", port=port)
+    Thread(target=start_tg, daemon=True).start()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
