@@ -1,8 +1,7 @@
 """
 telegram-multi-forward-bot FINAL
-- Webhook
 - Super Admin only
-- Group Set + add_group / list_groups 유지
+- Fixed groups (env) + temp_group (runtime)
 """
 
 # ======================
@@ -55,7 +54,7 @@ SUPER_ADMIN_IDS = {
 }
 
 if not BOT_TOKEN or not WEBHOOK_URL:
-    raise RuntimeError("필수 환경변수 누락")
+    raise RuntimeError("환경변수 누락")
 
 # ======================
 # 6. 그룹 로딩
@@ -63,34 +62,35 @@ if not BOT_TOKEN or not WEBHOOK_URL:
 GROUP_FILE = "groups.json"
 
 def load_groups():
-    base = {}
+    groups = {}
 
     # 🔹 환경변수 그룹
     for k, v in os.environ.items():
         if k.startswith("GROUP_") and k.endswith("_IDS"):
             name = k.replace("GROUP_", "").replace("_IDS", "").lower()
-            base[name] = {int(x) for x in v.split(",") if x.strip()}
+            groups[name] = {int(x) for x in v.split(",") if x.strip()}
 
-    # 🔹 파일 그룹
+    # 🔹 temp_group은 항상 존재
+    groups.setdefault("temp_group", set())
+
+    # 🔹 런타임 저장 그룹
     if os.path.exists(GROUP_FILE):
         with open(GROUP_FILE) as f:
             saved = json.load(f)
-        for name, ids in saved.items():
-            base.setdefault(name, set()).update(ids)
+        groups["temp_group"].update(saved.get("temp_group", []))
 
-    return base
+    return groups
 
 def save_groups():
     with open(GROUP_FILE, "w") as f:
         json.dump(
-            {k: list(v) for k, v in GROUP_SETS.items()},
+            {"temp_group": list(GROUP_SETS["temp_group"])},
             f
         )
 
 GROUP_SETS = load_groups()
 log("STATE", f"GROUP_SETS={GROUP_SETS}")
 
-# 사용자 상태
 ACTIVE_GROUP = {}  # uid -> group_name
 
 # ======================
@@ -110,7 +110,7 @@ def is_super_admin(uid: int) -> bool:
     return uid in SUPER_ADMIN_IDS
 
 # ======================
-# 10. 그룹 관리 명령어
+# 10. 그룹 관리
 # ======================
 async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -123,24 +123,14 @@ async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ 단체방에서만 사용 가능")
         return
 
-    if not context.args:
-        await update.message.reply_text("사용법: /add_group group1")
-        return
-
-    name = context.args[0].lower()
-    GROUP_SETS.setdefault(name, set()).add(chat.id)
+    GROUP_SETS["temp_group"].add(chat.id)
     save_groups()
 
-    await update.message.reply_text(f"✅ {name}에 등록됨")
-    log("GROUP", f"{chat.id} → {name}")
+    await update.message.reply_text("✅ temp_group에 등록됨")
+    log("GROUP", f"{chat.id} → temp_group")
 
 async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not is_super_admin(uid):
-        return
-
-    if not GROUP_SETS:
-        await update.message.reply_text("📭 등록된 그룹 없음")
+    if not is_super_admin(update.effective_user.id):
         return
 
     text = "📦 그룹 목록:\n\n"
@@ -158,7 +148,7 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 # ======================
-# 11. send_group 핸들러
+# 11. send_group
 # ======================
 def make_send_handler(group_name: str):
     async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,7 +212,7 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ======================
-# 14. 핸들러 등록
+# 14. 핸들러
 # ======================
 application.add_handler(CommandHandler("add_group", add_group))
 application.add_handler(CommandHandler("list_groups", list_groups))
